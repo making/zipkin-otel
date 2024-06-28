@@ -13,33 +13,30 @@
  */
 package zipkin2.collector.otel.http;
 
+import com.google.protobuf.CodedInputStream;
 import com.linecorp.armeria.common.AggregationOptions;
 import com.linecorp.armeria.common.HttpData;
 import com.linecorp.armeria.common.HttpRequest;
 import com.linecorp.armeria.common.HttpResponse;
 import com.linecorp.armeria.common.HttpStatus;
 import com.linecorp.armeria.common.ResponseHeaders;
+import com.linecorp.armeria.common.encoding.StreamDecoderFactory;
 import com.linecorp.armeria.server.AbstractHttpService;
 import com.linecorp.armeria.server.ServerBuilder;
 import com.linecorp.armeria.server.ServerConfigurator;
 import com.linecorp.armeria.server.ServiceRequestContext;
-import io.netty.buffer.ByteBuf;
+import com.linecorp.armeria.server.encoding.DecodingService;
 import io.netty.buffer.ByteBufAllocator;
 import io.opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest;
 import java.io.IOException;
-import java.io.InputStream;
-import java.nio.ByteBuffer;
-import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.zip.GZIPInputStream;
 import zipkin2.Callback;
 import zipkin2.Span;
 import zipkin2.collector.Collector;
 import zipkin2.collector.CollectorComponent;
 import zipkin2.collector.CollectorMetrics;
 import zipkin2.collector.CollectorSampler;
-import zipkin2.internal.ReadBuffer;
 import zipkin2.storage.StorageComponent;
 import zipkin2.translation.zipkin.SpanTranslator;
 
@@ -108,6 +105,7 @@ public final class OpenTelemetryHttpCollector extends CollectorComponent
    */
   @Override
   public void reconfigure(ServerBuilder sb) {
+    sb.decorator(DecodingService.newDecorator(StreamDecoderFactory.gzip()));
     sb.service("/v1/traces", new HttpService(this));
   }
 
@@ -135,22 +133,12 @@ public final class OpenTelemetryHttpCollector extends CollectorComponent
             return null;
           }
 
-          ByteBuf byteBuf = content.byteBuf();
-          final ByteBuffer nioBuffer = byteBuf.nioBuffer();
-          try (ReadBuffer readBuffer = ReadBuffer.wrapUnsafe(nioBuffer)) {
-            try {
-              InputStream inputStream = readBuffer;
-              if ("gzip".equalsIgnoreCase(req.headers().get("content-encoding"))) {
-                inputStream = new GZIPInputStream(content.toInputStream());
-              } else if ("base64".equalsIgnoreCase(req.headers().get("content-encoding"))) {
-                inputStream = Base64.getDecoder().wrap(content.toInputStream());
-              }
-              ExportTraceServiceRequest request = ExportTraceServiceRequest.parseFrom(inputStream);
-              List<Span> spans = SpanTranslator.translate(request);
-              collector.collector.accept(spans, result);
-            } catch (IOException e) {
-              throw new RuntimeException(e);
-            }
+          try {
+            ExportTraceServiceRequest request = ExportTraceServiceRequest.parseFrom(CodedInputStream.newInstance(content.byteBuf().nioBuffer()));
+            List<Span> spans = SpanTranslator.translate(request);
+            collector.collector.accept(spans, result);
+          } catch (IOException e) {
+            throw new RuntimeException(e);
           }
           return null;
         }
